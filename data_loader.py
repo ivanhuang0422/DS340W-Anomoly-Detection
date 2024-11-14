@@ -5,7 +5,14 @@ import torch
 import cv2
 import glob
 import imgaug.augmenters as iaa
+import imgaug
 from perlin import rand_perlin_2d_np
+from PIL import Image
+
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+import cv2
 
 class MVTecDRAEMTestDataset(Dataset):
 
@@ -105,13 +112,26 @@ class MVTecDRAEMTrainDataset(Dataset):
         return aug
 
     def augment_image(self, image, anomaly_source_path):
-        aug = self.randAugmenter()
-        perlin_scale = 6
-        min_perlin_scale = 0
+        # Define the albumentations augmentation pipeline
+        transform = A.Compose([
+            A.RandomBrightnessContrast(p=0.2),
+            A.HueSaturationValue(p=0.3),
+            A.Blur(p=0.2),
+            A.VerticalFlip(p=0.5),
+            A.HorizontalFlip(p=0.5)
+        ])
+
+        # Load and resize the anomaly source image
         anomaly_source_img = cv2.imread(anomaly_source_path)
         anomaly_source_img = cv2.resize(anomaly_source_img, dsize=(self.resize_shape[1], self.resize_shape[0]))
 
-        anomaly_img_augmented = aug(image=anomaly_source_img)
+        # Apply albumentations augmentations
+        augmented = transform(image=anomaly_source_img)
+        anomaly_img_augmented = augmented['image']
+
+        # Perlin noise and thresholding for anomaly mask generation
+        perlin_scale = 6
+        min_perlin_scale = 0
         perlin_scalex = 2 ** (torch.randint(min_perlin_scale, perlin_scale, (1,)).numpy()[0])
         perlin_scaley = 2 ** (torch.randint(min_perlin_scale, perlin_scale, (1,)).numpy()[0])
 
@@ -121,25 +141,24 @@ class MVTecDRAEMTrainDataset(Dataset):
         perlin_thr = np.where(perlin_noise > threshold, np.ones_like(perlin_noise), np.zeros_like(perlin_noise))
         perlin_thr = np.expand_dims(perlin_thr, axis=2)
 
+        # Apply thresholded noise mask to the augmented image
         img_thr = anomaly_img_augmented.astype(np.float32) * perlin_thr / 255.0
 
+        # Blend augmented image with original image
         beta = torch.rand(1).numpy()[0] * 0.8
+        augmented_image = image * (1 - perlin_thr) + (1 - beta) * img_thr + beta * image * perlin_thr
 
-        augmented_image = image * (1 - perlin_thr) + (1 - beta) * img_thr + beta * image * (
-            perlin_thr)
-
+        # Randomly determine if an anomaly is added or not
         no_anomaly = torch.rand(1).numpy()[0]
         if no_anomaly > 0.5:
             image = image.astype(np.float32)
-            return image, np.zeros_like(perlin_thr, dtype=np.float32), np.array([0.0],dtype=np.float32)
+            return image, np.zeros_like(perlin_thr, dtype=np.float32), np.array([0.0], dtype=np.float32)
         else:
             augmented_image = augmented_image.astype(np.float32)
-            msk = (perlin_thr).astype(np.float32)
-            augmented_image = msk * augmented_image + (1-msk)*image
-            has_anomaly = 1.0
-            if np.sum(msk) == 0:
-                has_anomaly=0.0
-            return augmented_image, msk, np.array([has_anomaly],dtype=np.float32)
+            msk = perlin_thr.astype(np.float32)
+            augmented_image = msk * augmented_image + (1 - msk) * image
+            has_anomaly = 1.0 if np.sum(msk) > 0 else 0.0
+            return augmented_image, msk, np.array([has_anomaly], dtype=np.float32)
 
     def transform_image(self, image_path, anomaly_source_path):
         image = cv2.imread(image_path)
