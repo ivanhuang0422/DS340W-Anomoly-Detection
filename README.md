@@ -29,7 +29,7 @@ python create_mvtec_subsample.py --source ./mvtec_anomaly_detection --target ./m
 ```
 
 ## Training
-Pass the folder containing the training dataset to the **train_DRAEM.py** script as the --data_path argument and the
+Pass the folder containing the training dataset to the **train.py** script as the --data_path argument and the
 folder locating the anomaly source images as the --anomaly_source_path argument. 
 The training script also requires the batch size (--bs), learning rate (--lr), epochs (--epochs), path to store checkpoints
 (--checkpoint_path) and path to store logs (--log_path).
@@ -37,6 +37,12 @@ Example:
 
 ```
 python train.py --gpu_id 0 --obj_id -1 --lr 0.0001 --bs 8 --epochs 700 --data_path ./datasets/mvtec/ --anomaly_source_path ./datasets/dtd/images/ --checkpoint_path ./checkpoints/ --log_path ./logs/
+```
+
+Train on subsampled data example:
+```
+python train.py --gpu_id 0 --obj_id -1 --lr 0.001 --bs 8 --epochs 5  --data_path ./datasets/mvtec_subset/ --anomaly_so
+urce_path ./datasets/dtd/images/ --checkpoint_path ./checkpoints/ --log_path ./logs/ 
 ```
 
 The conda environement used in the project is decsribed in **requirements.txt**.
