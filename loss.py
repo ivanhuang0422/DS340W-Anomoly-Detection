@@ -169,3 +169,17 @@ class SSIM(torch.nn.Module):
 
         s_score, ssim_map = ssim(img1, img2, window=window, window_size=self.window_size, size_average=self.size_average)
         return 1.0 - s_score
+
+class CombinedAnomalyLoss(nn.Module):
+    """
+    CombinedAnomalyLoss to combine reconstruction loss and reward-based loss.
+    This allows balancing between traditional loss and DRL-based adaptation.
+    """
+    def __init__(self, reconstruction_loss_weight=0.5, reward_loss_weight=0.5):
+        super(CombinedAnomalyLoss, self).__init__()
+        self.reconstruction_loss_weight = reconstruction_loss_weight
+        self.reward_loss_weight = reward_loss_weight
+
+    def forward(self, reconstruction_loss, target, reward_loss):
+        combined_loss = (self.reconstruction_loss_weight * reconstruction_loss) + (self.reward_loss_weight * reward_loss)
+        return combined_loss
