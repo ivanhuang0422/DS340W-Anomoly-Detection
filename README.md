@@ -21,6 +21,12 @@ to download the MVTec and the DTD datasets to the **datasets** folder in the pro
 ./scripts/download_dataset.sh
 ```
 
+## Subsampling
+The **create_mvtec_subsample.py** script maintains the full structure of the MVTec AD dataset while creating a smaller subset. The script requires the path to the original MVTec AD dataset (--source), where you want the subsampled dataset to be created (--target), fractions of image to keep (default: 0.2 = 20%), and random seed for reproducibility (--seed). The subsample script can be run with:
+
+```
+python create_mvtec_subsample.py --source ./mvtec_anomaly_detection --target ./mvtec_subset --ratio 0.2
+```
 
 ## Training
 Pass the folder containing the training dataset to the **train_DRAEM.py** script as the --data_path argument and the
@@ -50,5 +56,6 @@ with pretrained models can be run with:
 ```
 python test.py --gpu_id 0 --base_model_name "DRAEM_seg_large_ae_large_0.0001_800_bs8" --data_path ./datasets/mvtec/ --checkpoint_path ./checkpoints/DRAEM_checkpoints/
 ```
+
 
 
