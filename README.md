@@ -41,8 +41,7 @@ python train.py --gpu_id 0 --obj_id -1 --lr 0.0001 --bs 8 --epochs 700 --data_pa
 
 Train on subsampled data example:
 ```
-python train.py --gpu_id 0 --obj_id -1 --lr 0.001 --bs 8 --epochs 5  --data_path ./datasets/mvtec_subset/ --anomaly_so
-urce_path ./datasets/dtd/images/ --checkpoint_path ./checkpoints/ --log_path ./logs/ 
+python train.py --gpu_id 0 --obj_id -1 --lr 0.001 --bs 8 --epochs 5  --data_path ./datasets/mvtec_subset/ --anomaly_source_path ./datasets/dtd/images/ --checkpoint_path ./checkpoints/ --log_path ./logs/ 
 ```
 
 The conda environement used in the project is decsribed in **requirements.txt**.
