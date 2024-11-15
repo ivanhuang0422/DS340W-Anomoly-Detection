@@ -60,7 +60,7 @@ location of the MVTec anomaly detection dataset (--data_path) and the folder whe
 with pretrained models can be run with:
 
 ```
-python test.py --gpu_id 0 --base_model_name "DRAEM_seg_large_ae_large_0.0001_800_bs8" --data_path ./datasets/mvtec/ --checkpoint_path ./checkpoints/DRAEM_checkpoints/
+python test.py --gpu_id 0 --base_model_name "DRAEM_test_0.001_5_bs8" --data_path ./datasets/mvtec/ --checkpoint_path ./checkpoints/DRAEM_checkpoints/
 ```
 
 
