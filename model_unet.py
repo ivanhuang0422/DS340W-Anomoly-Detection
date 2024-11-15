@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from drl_agent import AnomalyDetectionAgent
 
 
 class ReconstructiveSubNetwork(nn.Module):
@@ -8,9 +9,23 @@ class ReconstructiveSubNetwork(nn.Module):
         self.encoder = EncoderReconstructive(in_channels, base_width)
         self.decoder = DecoderReconstructive(base_width, out_channels=out_channels)
 
-    def forward(self, x):
+        self.drl_agent = AnomalyDetectionAgent(self, learning_rate = 0.001)
+
+    def forward(self, x, target=None, adapt=False):
+        """
+        Forward pass for the reconstructive network.
+        If `adapt` is True, use the DRL agent to adapt the network.
+        """
+        # Encode the input
         b5 = self.encoder(x)
+        
+        # Reconstruct the image
         output = self.decoder(b5)
+
+        # If target is provided and adapt is True, use the DRL agent to adapt the model
+        if adapt and target is not None:
+            self.drl_agent.adapt(features=b5, target=target, prediction=output)
+        
         return output
 
 class DiscriminativeSubNetwork(nn.Module):
@@ -21,9 +36,22 @@ class DiscriminativeSubNetwork(nn.Module):
         self.decoder_segment = DecoderDiscriminative(base_width, out_channels=out_channels)
         #self.segment_act = torch.nn.Sigmoid()
         self.out_features = out_features
-    def forward(self, x):
-        b1,b2,b3,b4,b5,b6 = self.encoder_segment(x)
-        output_segment = self.decoder_segment(b1,b2,b3,b4,b5,b6)
+
+        # Instantiate the DRL agent for the discriminative model
+        self.drl_agent = AnomalyDetectionAgent(self, learning_rate=0.001)
+
+    def forward(self, x, target=None, adapt=False):
+        """
+        Forward pass for the discriminative network.
+        If `adapt` is True, use the DRL agent to adapt the model.
+        """
+        b1, b2, b3, b4, b5, b6 = self.encoder_segment(x)
+        output_segment = self.decoder_segment(b1, b2, b3, b4, b5, b6)
+
+        # If adapt is True, use DRL agent to improve anomaly segmentation
+        if adapt and target is not None:
+            self.drl_agent.adapt(features=b5, target=target, prediction=output_segment)
+
         if self.out_features:
             return output_segment, b2, b3, b4, b5, b6
         else:
