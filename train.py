@@ -1,154 +1,170 @@
 import torch
-from data_loader import MVTecDRAEMTrainDataset
 from torch.utils.data import DataLoader
 from torch import optim
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from tensorboard_visualizer import TensorboardVisualizer
 from model_unet import ReconstructiveSubNetwork, DiscriminativeSubNetwork
-from loss import FocalLoss, SSIM
+from loss import CombinedLoss, FocalLoss, SSIM  # Import all required losses
+from data_loader import MVTecDRAEMTrainDataset
 import os
+import numpy as np
 
-def get_lr(optimizer):
-    for param_group in optimizer.param_groups:
-        return param_group['lr']
+class AnomalyTrainer:
+    def __init__(self, args):
+        self.args = args
+        self.device = torch.device(f'cuda:{args.gpu_id}' if torch.cuda.is_available() else 'cpu')
+        
+        # Initialize models
+        self.model = ReconstructiveSubNetwork().to(self.device)
+        self.model_seg = DiscriminativeSubNetwork().to(self.device)
+        
+        # Adjusted learning rates and optimizer
+        self.optimizer = optim.AdamW([  # Changed to AdamW
+            {"params": self.model.parameters(), "lr": args.lr * 3},    # Increased reconstruction learning rate
+            {"params": self.model_seg.parameters(), "lr": args.lr * 4} # Increased segmentation learning rate
+        ], weight_decay=0.01)  # Added weight decay
+        
+        # Use OneCycleLR scheduler with higher max_lr
+        self.scheduler = optim.lr_scheduler.OneCycleLR(
+            self.optimizer,
+            max_lr=[args.lr * 3, args.lr * 4],
+            epochs=args.epochs,
+            steps_per_epoch=args.steps_per_epoch,
+            pct_start=0.3  # Warm-up for first 30% of training
+        )
+        
+        # Adjusted loss weights
+        self.combined_loss = CombinedLoss(
+            alpha=0.3,  # Reconstruction weight
+            beta=0.3,   # SSIM weight
+            gamma=0.4   # Segmentation weight (increased)
+        ).to(self.device)
 
-def weights_init(m):
-    classname = m.__class__.__name__
-    if classname.find('Conv') != -1:
-        m.weight.data.normal_(0.0, 0.02)
-    elif classname.find('BatchNorm') != -1:
-        m.weight.data.normal_(1.0, 0.02)
-        m.bias.data.fill_(0)
+    def train_epoch(self, dataloader, epoch):
+        self.model.train()
+        self.model_seg.train()
+        
+        total_loss = 0
+        for i, batch in enumerate(dataloader):
+            # Get data with augmentation
+            images = batch["image"].to(self.device)
+            aug_images = batch["augmented_image"].to(self.device)
+            masks = batch["anomaly_mask"].to(self.device)
+            
+            # Apply additional augmentation
+            if torch.rand(1) < 0.5:  # Random horizontal flip
+                images = torch.flip(images, dims=[3])
+                aug_images = torch.flip(aug_images, dims=[3])
+                masks = torch.flip(masks, dims=[3])
+            
+            # Forward pass
+            rec_images, features = self.model(aug_images)
+            joined = torch.cat((rec_images.detach(), aug_images), dim=1)
+            seg_out = self.model_seg(joined)
+            seg_out_sm = torch.softmax(seg_out, dim=1)
+            
+            # Calculate main loss
+            loss = self.combined_loss(rec_images, images, seg_out, masks)
+            
+            # Add feature matching loss
+            with torch.no_grad():
+                orig_features = self.model(images)[1]
+            feature_loss = F.mse_loss(features, orig_features.detach())
+            loss += 0.2 * feature_loss  # Increased feature loss weight
+            
+            # Backward and optimize
+            self.optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)  # Added gradient clipping
+            torch.nn.utils.clip_grad_norm_(self.model_seg.parameters(), 1.0)
+            self.optimizer.step()
+            
+            # Update learning rates
+            self.scheduler.step()
+            
+            total_loss += loss.item()
+            
+            if i % 2 == 0:
+                print(f"Batch {i+1}/{len(dataloader)}, Loss: {loss.item():.4f}")
+        
+        return total_loss / len(dataloader)
+
+    def save_checkpoint(self, epoch, obj_name):
+        checkpoint_path = os.path.join(
+            self.args.checkpoint_path,
+            f"DRAEM_test_{self.args.lr}_{self.args.epochs}_bs{self.args.bs}_{obj_name}_"
+        )
+        
+        torch.save(self.model.state_dict(), checkpoint_path + ".pckl")
+        torch.save(self.model_seg.state_dict(), checkpoint_path + "_seg.pckl")
 
 def train_on_device(obj_names, args):
-    if not os.path.exists(args.checkpoint_path):
-        os.makedirs(args.checkpoint_path)
-
-    if not os.path.exists(args.log_path):
-        os.makedirs(args.log_path)
-
     for obj_name in obj_names:
-        run_name = 'DRAEM_test_'+str(args.lr)+'_'+str(args.epochs)+'_bs'+str(args.bs)+"_"+obj_name+'_'
-        visualizer = TensorboardVisualizer(log_dir=os.path.join(args.log_path, run_name+"/"))
-
-        model = ReconstructiveSubNetwork(in_channels=3, out_channels=3)
-        model.cuda()
-        model.apply(weights_init)
-
-        model_seg = DiscriminativeSubNetwork(in_channels=6, out_channels=2)
-        model_seg.cuda()
-        model_seg.apply(weights_init)
-
-        optimizer = torch.optim.Adam([
-            {"params": model.parameters(), "lr": args.lr},
-            {"params": model_seg.parameters(), "lr": args.lr}
-        ])
-
-        scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [args.epochs*0.8, args.epochs*0.9], gamma=0.2, last_epoch=-1)
-
-        loss_l2 = torch.nn.modules.loss.MSELoss()
-        loss_ssim = SSIM()
-        loss_focal = FocalLoss()
-
-        dataset = MVTecDRAEMTrainDataset(args.data_path + obj_name + "/train/good/", 
-                                        args.anomaly_source_path, 
-                                        resize_shape=[256, 256])
-
-        dataloader = DataLoader(dataset, batch_size=args.bs,
-                              shuffle=True, num_workers=16)
-
-        n_iter = 0
+        print(f"\nTraining on {obj_name}")
+        print("="*50)
+        
+        # Initialize trainer
+        trainer = AnomalyTrainer(args)
+        
+        # Setup data
+        dataset = MVTecDRAEMTrainDataset(
+            os.path.join(args.data_path, obj_name, "train/good/"),
+            args.anomaly_source_path,
+            resize_shape=[256, 256]
+        )
+        
+        dataloader = DataLoader(
+            dataset,
+            batch_size=args.bs,
+            shuffle=True,
+            num_workers=4
+        )
+        
+        print(f"Dataset size: {len(dataset)} images")
+        print(f"Batch size: {args.bs}")
+        print(f"Steps per epoch: {len(dataloader)}")
+        
+        # Training loop
         for epoch in range(args.epochs):
-            print("Epoch: "+str(epoch))
-            for i_batch, sample_batched in enumerate(dataloader):
-                gray_batch = sample_batched["image"].cuda()
-                aug_gray_batch = sample_batched["augmented_image"].cuda()
-                anomaly_mask = sample_batched["anomaly_mask"].cuda()
+            print(f"\nEpoch {epoch+1}/{args.epochs}")
+            loss = trainer.train_epoch(dataloader, epoch)
+            print(f"Epoch {epoch+1} completed, Average Loss: {loss:.4f}")
+            
+            # Save checkpoint
+            if (epoch + 1) % 5 == 0:
+                trainer.save_checkpoint(epoch, obj_name)
+                print(f"Checkpoint saved at epoch {epoch+1}")
 
-                # Forward pass for main training
-                optimizer.zero_grad()
-                
-                gray_rec = model(aug_gray_batch)
-                joined_in = torch.cat((gray_rec, aug_gray_batch), dim=1)
-                out_mask = model_seg(joined_in)
-                out_mask_sm = torch.softmax(out_mask, dim=1)
-
-                # Calculate losses
-                l2_loss = loss_l2(gray_rec, gray_batch)
-                ssim_loss = loss_ssim(gray_rec, gray_batch)
-                segment_loss = loss_focal(out_mask_sm, anomaly_mask)
-
-                # Combined loss
-                total_loss = l2_loss + ssim_loss + segment_loss
-
-                # Backward pass for main training
-                total_loss.backward()
-                optimizer.step()
-
-                # DRL adaptation step
-                optimizer.zero_grad()
-                
-                # Compute new reconstruction with gradients
-                adapted_rec = model(aug_gray_batch)
-                adaptation_loss = loss_l2(adapted_rec, gray_batch)
-                
-                # Calculate reward (not used in backward pass)
-                with torch.no_grad():
-                    reward = model.drl_agent.get_reward(gray_batch.detach(), adapted_rec.detach())
-
-                # Update model based on adaptation loss
-                adaptation_loss.backward()
-                optimizer.step()
-
-                # Visualization logic
-                if args.visualize and n_iter % 200 == 0:
-                    visualizer.plot_loss(l2_loss.item(), n_iter, loss_name='l2_loss')
-                    visualizer.plot_loss(ssim_loss.item(), n_iter, loss_name='ssim_loss')
-                    visualizer.plot_loss(segment_loss.item(), n_iter, loss_name='segment_loss')
-                    visualizer.plot_loss(adaptation_loss.item(), n_iter, loss_name='adaptation_loss')
-                    
-                if args.visualize and n_iter % 400 == 0:
-                    t_mask = out_mask_sm[:, 1:, :, :]
-                    visualizer.visualize_image_batch(aug_gray_batch, n_iter, image_name='batch_augmented')
-                    visualizer.visualize_image_batch(gray_batch, n_iter, image_name='batch_recon_target')
-                    visualizer.visualize_image_batch(gray_rec, n_iter, image_name='batch_recon_out')
-                    visualizer.visualize_image_batch(anomaly_mask, n_iter, image_name='mask_target')
-                    visualizer.visualize_image_batch(t_mask, n_iter, image_name='mask_out')
-
-                n_iter += 1
-
-            scheduler.step()
-
-            # Save model checkpoints
-            torch.save(model.state_dict(), os.path.join(args.checkpoint_path, run_name+".pckl"))
-            torch.save(model_seg.state_dict(), os.path.join(args.checkpoint_path, run_name+"_seg.pckl"))
-
-if __name__=="__main__":
+if __name__ == "__main__":
     import argparse
-
+    
     parser = argparse.ArgumentParser()
-    parser.add_argument('--obj_id', action='store', type=int, required=True)
-    parser.add_argument('--bs', action='store', type=int, required=True)
-    parser.add_argument('--lr', action='store', type=float, required=True)
-    parser.add_argument('--epochs', action='store', type=int, required=True)
-    parser.add_argument('--gpu_id', action='store', type=int, default=0, required=False)
-    parser.add_argument('--data_path', action='store', type=str, required=True)
-    parser.add_argument('--anomaly_source_path', action='store', type=str, required=True)
-    parser.add_argument('--checkpoint_path', action='store', type=str, required=True)
-    parser.add_argument('--log_path', action='store', type=str, required=True)
+    parser.add_argument('--obj_id', type=int, required=True)
+    parser.add_argument('--bs', type=int, required=True)
+    parser.add_argument('--lr', type=float, required=True)
+    parser.add_argument('--epochs', type=int, required=True)
+    parser.add_argument('--gpu_id', type=int, default=0)
+    parser.add_argument('--data_path', type=str, required=True)
+    parser.add_argument('--anomaly_source_path', type=str, required=True)
+    parser.add_argument('--checkpoint_path', type=str, required=True)
+    parser.add_argument('--log_path', type=str, required=True)
     parser.add_argument('--visualize', action='store_true')
-
+    
     args = parser.parse_args()
-
+    
+    # Calculate steps per epoch based on dataset size and batch size
+    # This is a placeholder value - it will be updated when we know the actual dataset size
+    args.steps_per_epoch = 1000  # Will be adjusted based on actual dataset size
+    
     obj_batch = [['capsule'], ['bottle'], ['carpet'], ['leather'], ['pill'],
                 ['transistor'], ['tile'], ['cable'], ['zipper'], ['toothbrush'],
                 ['metal_nut'], ['hazelnut'], ['screw'], ['grid'], ['wood']]
-
-    if int(args.obj_id) == -1:
-        picked_classes = ['capsule', 'bottle', 'carpet', 'leather', 'pill',
-                         'transistor', 'tile', 'cable', 'zipper', 'toothbrush',
-                         'metal_nut', 'hazelnut', 'screw', 'grid', 'wood']
+    
+    if args.obj_id == -1:
+        picked_classes = [item[0] for item in obj_batch]
     else:
-        picked_classes = obj_batch[int(args.obj_id)]
-
+        picked_classes = obj_batch[args.obj_id]
+    
     with torch.cuda.device(args.gpu_id):
         train_on_device(picked_classes, args)

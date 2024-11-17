@@ -2,66 +2,72 @@ import torch
 import torch.nn as nn
 from drl_agent import AnomalyDetectionAgent
 
+class SpatialAttention(nn.Module):
+    def __init__(self, in_channels):
+        super(SpatialAttention, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, in_channels // 8, 1)
+        self.conv2 = nn.Conv2d(in_channels // 8, in_channels, 1)
+        
+    def forward(self, x):
+        attention = self.conv1(x)
+        attention = torch.relu(attention)
+        attention = self.conv2(attention)
+        attention = torch.sigmoid(attention)
+        return x * attention
 
 class ReconstructiveSubNetwork(nn.Module):
-    def __init__(self,in_channels=3, out_channels=3, base_width=128):
+    def __init__(self, in_channels=3, out_channels=3, base_width=128):
         super(ReconstructiveSubNetwork, self).__init__()
         self.encoder = EncoderReconstructive(in_channels, base_width)
         self.decoder = DecoderReconstructive(base_width, out_channels=out_channels)
-
-        self.drl_agent = AnomalyDetectionAgent(self, learning_rate = 0.001)
+        
+        # Initialize attention module with correct channel size
+        self.attention = SpatialAttention(base_width * 8)
+        
+        self.drl_agent = AnomalyDetectionAgent(self, learning_rate=0.001)
 
     def forward(self, x, target=None, adapt=False):
-        """
-        Forward pass for the reconstructive network.
-        If `adapt` is True, use the DRL agent to adapt the network.
-        """
-        # Encode the input
-        b5 = self.encoder(x)
+        features = self.encoder(x)
+        attended_features = self.attention(features)
+        output = self.decoder(attended_features)
         
-        # Reconstruct the image
-        output = self.decoder(b5)
-
-        # If target is provided and adapt is True, use the DRL agent to adapt the model
         if adapt and target is not None:
-            self.drl_agent.adapt(features=b5, target=target, prediction=output)
+            self.drl_agent.adapt(x, target, output)
         
-        return output
+        return output, attended_features
 
 class DiscriminativeSubNetwork(nn.Module):
-    def __init__(self,in_channels=3, out_channels=3, base_channels=64, out_features=False):
+    def __init__(self, in_channels=6, out_channels=2, base_channels=64):
         super(DiscriminativeSubNetwork, self).__init__()
         base_width = base_channels
         self.encoder_segment = EncoderDiscriminative(in_channels, base_width)
         self.decoder_segment = DecoderDiscriminative(base_width, out_channels=out_channels)
-        #self.segment_act = torch.nn.Sigmoid()
-        self.out_features = out_features
-
-        # Instantiate the DRL agent for the discriminative model
+        
+        # Initialize attention modules with correct channel sizes
+        self.attention1 = SpatialAttention(base_width * 4)  # Adjusted size
+        self.attention2 = SpatialAttention(base_width * 8)  # Adjusted size
+        
         self.drl_agent = AnomalyDetectionAgent(self, learning_rate=0.001)
 
     def forward(self, x, target=None, adapt=False):
-        """
-        Forward pass for the discriminative network.
-        If `adapt` is True, use the DRL agent to adapt the model.
-        """
         b1, b2, b3, b4, b5, b6 = self.encoder_segment(x)
+        
+        # Apply attention to intermediate features
+        b3 = self.attention1(b3)  # b3 has base_width * 4 channels
+        b5 = self.attention2(b5)  # b5 has base_width * 8 channels
+        
         output_segment = self.decoder_segment(b1, b2, b3, b4, b5, b6)
-
-        # If adapt is True, use DRL agent to improve anomaly segmentation
+        
         if adapt and target is not None:
-            self.drl_agent.adapt(features=b5, target=target, prediction=output_segment)
-
-        if self.out_features:
-            return output_segment, b2, b3, b4, b5, b6
-        else:
-            return output_segment
+            self.drl_agent.adapt(x, target, output_segment)
+        
+        return output_segment
 
 class EncoderDiscriminative(nn.Module):
     def __init__(self, in_channels, base_width):
         super(EncoderDiscriminative, self).__init__()
         self.block1 = nn.Sequential(
-            nn.Conv2d(in_channels,base_width, kernel_size=3, padding=1),
+            nn.Conv2d(in_channels, base_width, kernel_size=3, padding=1),
             nn.BatchNorm2d(base_width),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width, base_width, kernel_size=3, padding=1),
@@ -69,7 +75,7 @@ class EncoderDiscriminative(nn.Module):
             nn.ReLU(inplace=True))
         self.mp1 = nn.Sequential(nn.MaxPool2d(2))
         self.block2 = nn.Sequential(
-            nn.Conv2d(base_width,base_width*2, kernel_size=3, padding=1),
+            nn.Conv2d(base_width, base_width*2, kernel_size=3, padding=1),
             nn.BatchNorm2d(base_width*2),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width*2, base_width*2, kernel_size=3, padding=1),
@@ -77,7 +83,7 @@ class EncoderDiscriminative(nn.Module):
             nn.ReLU(inplace=True))
         self.mp2 = nn.Sequential(nn.MaxPool2d(2))
         self.block3 = nn.Sequential(
-            nn.Conv2d(base_width*2,base_width*4, kernel_size=3, padding=1),
+            nn.Conv2d(base_width*2, base_width*4, kernel_size=3, padding=1),
             nn.BatchNorm2d(base_width*4),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width*4, base_width*4, kernel_size=3, padding=1),
@@ -85,7 +91,7 @@ class EncoderDiscriminative(nn.Module):
             nn.ReLU(inplace=True))
         self.mp3 = nn.Sequential(nn.MaxPool2d(2))
         self.block4 = nn.Sequential(
-            nn.Conv2d(base_width*4,base_width*8, kernel_size=3, padding=1),
+            nn.Conv2d(base_width*4, base_width*8, kernel_size=3, padding=1),
             nn.BatchNorm2d(base_width*8),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width*8, base_width*8, kernel_size=3, padding=1),
@@ -93,7 +99,7 @@ class EncoderDiscriminative(nn.Module):
             nn.ReLU(inplace=True))
         self.mp4 = nn.Sequential(nn.MaxPool2d(2))
         self.block5 = nn.Sequential(
-            nn.Conv2d(base_width*8,base_width*8, kernel_size=3, padding=1),
+            nn.Conv2d(base_width*8, base_width*8, kernel_size=3, padding=1),
             nn.BatchNorm2d(base_width*8),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width*8, base_width*8, kernel_size=3, padding=1),
@@ -102,19 +108,18 @@ class EncoderDiscriminative(nn.Module):
 
         self.mp5 = nn.Sequential(nn.MaxPool2d(2))
         self.block6 = nn.Sequential(
-            nn.Conv2d(base_width*8,base_width*8, kernel_size=3, padding=1),
+            nn.Conv2d(base_width*8, base_width*8, kernel_size=3, padding=1),
             nn.BatchNorm2d(base_width*8),
             nn.ReLU(inplace=True),
             nn.Conv2d(base_width*8, base_width*8, kernel_size=3, padding=1),
             nn.BatchNorm2d(base_width*8),
             nn.ReLU(inplace=True))
 
-
     def forward(self, x):
         b1 = self.block1(x)
         mp1 = self.mp1(b1)
         b2 = self.block2(mp1)
-        mp2 = self.mp3(b2)
+        mp2 = self.mp2(b2)
         b3 = self.block3(mp2)
         mp3 = self.mp3(b3)
         b4 = self.block4(mp3)
@@ -122,7 +127,7 @@ class EncoderDiscriminative(nn.Module):
         b5 = self.block5(mp4)
         mp5 = self.mp5(b5)
         b6 = self.block6(mp5)
-        return b1,b2,b3,b4,b5,b6
+        return b1, b2, b3, b4, b5, b6
 
 class DecoderDiscriminative(nn.Module):
     def __init__(self, base_width, out_channels=1):
