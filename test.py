@@ -111,7 +111,6 @@ def test(obj_names, mvtec_path, checkpoint_path, base_model_name):
         anomaly_score_prediction = np.array(anomaly_score_prediction)
         anomaly_score_gt = np.array(anomaly_score_gt)
 
-        # Calculate metrics
         try:
             auroc = roc_auc_score(anomaly_score_gt, anomaly_score_prediction)
             ap = average_precision_score(anomaly_score_gt, anomaly_score_prediction)
@@ -124,6 +123,7 @@ def test(obj_names, mvtec_path, checkpoint_path, base_model_name):
             obj_auroc_image_list.append(auroc)
             obj_ap_image_list.append(ap)
 
+            # Print results in the exact format requested
             print(f"\nResults for {obj_name}:")
             print(f"AUC Image: {auroc:.3f}")
             print(f"AP Image: {ap:.3f}")
@@ -137,13 +137,6 @@ def test(obj_names, mvtec_path, checkpoint_path, base_model_name):
         # Clear models from GPU
         del model, model_seg
         clear_gpu_memory()
-
-    if obj_auroc_image_list:
-        print(f"\nMean Results:")
-        print(f"AUC Image mean: {np.mean(obj_auroc_image_list):.3f}")
-        print(f"AP Image mean: {np.mean(obj_ap_image_list):.3f}")
-        print(f"AUC Pixel mean: {np.mean(obj_auroc_pixel_list):.3f}")
-        print(f"AP Pixel mean: {np.mean(obj_ap_pixel_list):.3f}")
 
 if __name__=="__main__":
     import argparse
